@@ -2,12 +2,43 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+)
+
+type deepSeekResponseBody struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+}
+
+type deepSeekMessage struct {
+	Content string `json:"content"`
+	Role    string `json:"role"`
+}
+
+// deepSeekRequestBody 请求体
+type deepSeekRequestBody struct {
+	Model            string            `json:"model"`
+	Messages         []deepSeekMessage `json:"messages"`
+	MaxTokens        int               `json:"max_tokens"`
+	Temperature      float32           `json:"temperature"`
+	TopP             int               `json:"top_p"`
+	FrequencyPenalty int               `json:"frequency_penalty"`
+	PresencePenalty  int               `json:"presence_penalty"`
+}
+
+const (
+	deepSeekURL = "https://api.deepseek.com/v1/chat/"
+	modelName   = "deepseek-chat"
+	apiKey      = ""
 )
 
 func uploadAndTranscribeHandler(w http.ResponseWriter, r *http.Request) {
@@ -68,9 +99,13 @@ func uploadAndTranscribeHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("语音转文字失败: %v", err), http.StatusInternalServerError)
 		return
 	}
-
+	command, err := callDeepseek(text)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("文字转指令失败: %v", err), http.StatusInternalServerError)
+		return
+	}
 	// 返回转录结果
-	fmt.Fprintf(w, "音频文件 %s 的转录结果:\n%s\n", handler.Filename, text)
+	fmt.Fprintf(w, "%s", command)
 
 	// 可选：清理临时文件
 	os.Remove(originalFilePath)
@@ -109,8 +144,54 @@ func transcribeWithWhisper(filePath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("Whisper 执行失败: %v, stderr: %s", err, stderr.String())
 	}
-
 	return out.String(), nil
+}
+
+func callDeepseek(commandText string) (string, error) {
+	requestBody := deepSeekRequestBody{
+		Model: modelName,
+		Messages: []deepSeekMessage{
+			{
+				Content: "你将收到一段文本，你需要从里面提取出用户的指令，指令的类型分为：前进、左转、右转、后退。你需要直接回答指令的类型，不要增加其他内容",
+				Role:    "system",
+			},
+		},
+		MaxTokens:        2048,
+		Temperature:      1.0,
+		TopP:             1,
+		FrequencyPenalty: 0,
+		PresencePenalty:  0,
+	}
+	nowMessage := deepSeekMessage{Content: commandText, Role: "user"}
+	requestBody.Messages = append(requestBody.Messages, nowMessage)
+	requestData := bytes.NewBuffer(make([]byte, 0, 1024*1024))
+	err := json.NewEncoder(requestData).Encode(&requestBody)
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequest("POST", deepSeekURL+"completions", requestData)
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	client := &http.Client{}
+	response, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	var deepResponseBody deepSeekResponseBody
+	err = json.NewDecoder(response.Body).Decode(&deepResponseBody)
+	if err != nil {
+		return "", err
+	}
+	if len(deepResponseBody.Choices) > 0 {
+		return deepResponseBody.Choices[0].Message.Content, nil
+	} else {
+		return "", nil
+	}
 }
 
 func main() {
