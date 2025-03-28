@@ -1,7 +1,3 @@
-以下是更新后的 `README.md`，在安装 `whisper.cpp` 的步骤中添加了安装 `cmake` 以及相关依赖的详细说明，确保用户能够顺利完成环境搭建。
-
----
-
 # AudioCommandServer
 
 `AudioCommandServer` 是一个基于 Go 语言的 HTTP 服务，用于接收音频文件，将其转换为文字，并通过 DeepSeek API 提取特定指令（前进、左转、右转、后退）。项目集成了 `ffmpeg` 进行音频预处理和 `whisper.cpp` 进行本地语音转文字，以实现高效的音频处理。
