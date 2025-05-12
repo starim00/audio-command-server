@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/liuzl/gocc"
 	"io"
 	"net/http"
 	"os"
@@ -12,39 +13,10 @@ import (
 	"strings"
 )
 
-type deepSeekResponseBody struct {
-	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-	} `json:"choices"`
-}
-
-type deepSeekMessage struct {
-	Content string `json:"content"`
-	Role    string `json:"role"`
-}
-
-type deepSeekRequestBody struct {
-	Model            string            `json:"model"`
-	Messages         []deepSeekMessage `json:"messages"`
-	MaxTokens        int               `json:"max_tokens"`
-	Temperature      float32           `json:"temperature"`
-	TopP             int               `json:"top_p"`
-	FrequencyPenalty int               `json:"frequency_penalty"`
-	PresencePenalty  int               `json:"presence_penalty"`
-}
-
 type response struct {
-	Command string `json:"command"`
-	Error   string `json:"error,omitempty"`
+	Text  string `json:"text"`
+	Error string `json:"error,omitempty"`
 }
-
-const (
-	deepSeekURL = "https://api.deepseek.com/v1/chat/completions" // 修正后的 URL
-	modelName   = "deepseek-chat"
-	apiKey      = "YOUR_API_KEY_HERE" // 请替换为你的 DeepSeek API Key
-)
 
 func uploadAndTranscribeHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -101,14 +73,13 @@ func uploadAndTranscribeHandler(w http.ResponseWriter, r *http.Request) {
 	// 清理 Whisper 输出，去除多余换行符和空白
 	text = strings.TrimSpace(text)
 
-	command, err := callDeepseek(text)
+	// 返回 JSON 响应
+	text, err = toSimplifiedChinese(text)
 	if err != nil {
-		sendJSONError(w, fmt.Sprintf("文字转指令失败: %v", err), http.StatusInternalServerError)
+		sendJSONError(w, fmt.Sprintf("繁简处理失败: %v", err), http.StatusInternalServerError)
 		return
 	}
-
-	// 返回 JSON 响应
-	resp := response{Command: command}
+	resp := response{Text: text}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 
@@ -130,7 +101,7 @@ func convertAudioWithFFmpeg(inputPath, outputPath string) error {
 
 func transcribeWithWhisper(filePath string) (string, error) {
 	whisperBin := "./whisper.cpp/build/bin/whisper-cli" // 更新为你的 whisper 可执行文件路径
-	modelPath := "./whisper.cpp/models/ggml-tiny.bin"
+	modelPath := "./whisper.cpp/models/ggml-medium.bin"
 
 	cmd := exec.Command(whisperBin, "-m", modelPath, "-f", filePath, "-l", "zh")
 	var out bytes.Buffer
@@ -145,61 +116,19 @@ func transcribeWithWhisper(filePath string) (string, error) {
 	return out.String(), nil
 }
 
-func callDeepseek(commandText string) (string, error) {
-	requestBody := deepSeekRequestBody{
-		Model: modelName,
-		Messages: []deepSeekMessage{
-			{
-				Content: "你将收到一段文本，你需要从里面提取出用户的指令，指令的类型分为：前进、左转、右转、后退。你需要直接回答指令的类型，不要增加其他内容",
-				Role:    "system",
-			},
-			{
-				Content: commandText,
-				Role:    "user",
-			},
-		},
-		MaxTokens:        2048,
-		Temperature:      1.0,
-		TopP:             1,
-		FrequencyPenalty: 0,
-		PresencePenalty:  0,
-	}
-
-	var requestData bytes.Buffer
-	err := json.NewEncoder(&requestData).Encode(requestBody)
+// toSimplifiedChinese 使用 opencc-go 转换为简体中文
+func toSimplifiedChinese(text string) (string, error) {
+	// 初始化 OpenCC，t2s 表示繁体到简体
+	converter, err := gocc.New("t2s")
 	if err != nil {
-		return "", fmt.Errorf("编码请求体失败: %v", err)
+		return "", fmt.Errorf("初始化 OpenCC 失败: %v", err)
 	}
-
-	req, err := http.NewRequest("POST", deepSeekURL, &requestData)
+	// 进行转换
+	converted, err := converter.Convert(text)
 	if err != nil {
-		return "", fmt.Errorf("创建请求失败: %v", err)
+		return "", fmt.Errorf("繁简转换失败: %v", err)
 	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("发送请求失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("DeepSeek API 返回错误: %d, %s", resp.StatusCode, string(body))
-	}
-
-	var deepResponse deepSeekResponseBody
-	err = json.NewDecoder(resp.Body).Decode(&deepResponse)
-	if err != nil {
-		return "", fmt.Errorf("解码响应失败: %v", err)
-	}
-
-	if len(deepResponse.Choices) > 0 {
-		return deepResponse.Choices[0].Message.Content, nil
-	}
-	return "", fmt.Errorf("DeepSeek 未返回有效指令")
+	return converted, nil
 }
 
 func sendJSONError(w http.ResponseWriter, msg string, code int) {
